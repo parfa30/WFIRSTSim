@@ -2,8 +2,10 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
-
-import ConfigParser
+from scipy import fftpack
+import matplotlib.image as mpimg
+from PIL import Image
+import configparser
 
 
 #Create PSF shape on a grid based on primary mirror size, input angle, wavelength, position on detector
@@ -20,9 +22,9 @@ import ConfigParser
 
 #Calculate dpdf
 
-class MonochromaticSource(object):
+class PSF(object):
     def __init__(self,config_file):
-        self.config = ConfigParser.ConfigParser()
+        self.config = configparser.ConfigParser()
         self.config.read(config_file)
 
         self.dia = self.config.getfloat('Instrument','Diam')
@@ -30,40 +32,108 @@ class MonochromaticSource(object):
         self.det_ny = self.config.getint('Instrument','det_ny')
 
         self.FWHM = self.config.getfloat('Observation','FWHM')
-        self.flux = self.config.getfloat('Observation','flux') 
+        self.flux = self.config.getfloat('Observation','flux')
+
+        self.x0 = 0 #where the center of PSF is
+        self.y0 = 0
+
+         
 
 
     def grid(self):
-        xx = np.arange(0,self.det_nx,1.)
-        yy = np.arange(0,self.det_ny,1.)
+        xx = np.arange(0,self.det_nx,1,dtype='complex')
+        yy = np.arange(0,self.det_ny,1,dtype='complex')
+        
         x, y = np.meshgrid(xx,yy)
-        x0 = self.det_nx/2. 
-        y0 = self.det_ny/2.
-        return x, y, x0, y0
-
-    #need to establish where FWHM is defined
-    def gaussian(self):
-        x, y, x0, y0 = self.grid()
-        alpha = self.FWHM/2.35
-        gauss = self.flux*((alpha**2)*(2*np.pi))**(-1.)*np.exp(-(1./2.)*((x-x0)/alpha)**2.)*np.exp(-(1./2.)*((y-y0)/alpha)**2.)
-
-        fig = plt.figure(figsize=(6, 3.2))
-
-        ax = fig.add_subplot(111)
-        ax.set_title('Monochromatic Gaussian PSF')
         
-        plt.imshow(gauss)
-        plt.show()
+        return x, y
 
-        return gauss
+psf = PSF('/Users/parkerf/Research/WFIRST/PSF/config_file.txt')
+
+#define an obstruction and np.where around it
+def obstruction(imagefile):
+    img = mpimg.imread(imagefile)
+    #print (img.shape, img.dtype)
+    x,y = img.shape[0],img.shape[1]
+
+    #create a bindary file
+    if img.dtype == 'uint8':
+        img = img[:,:,0]
+        img[np.where(img<np.amax(img))] = 1
+        img[np.where(img==np.amax(img))] = 0
+    else:
+        pass
+
+    #ind = np.where(image==1)
+    return img
+
+
+#need to establish where FWHM is defined
+def gaussian():
+    #Could make this take any obstruction file but easier like this for now.
+    obs = obstruction('/Users/parkerf/Research/WFIRST/WFIRST_IFU_Pupil_Mask_for_R1.jpg')
+    ox, oy = obs.shape[0],obs.shape[1]
+
+    NX, NY = psf.grid()
+    NX, NY = NX-(psf.det_nx/2.), NY-(psf.det_ny/2.)
+
+    alpha = psf.FWHM/2.35
+    gauss = psf.flux*((alpha**2)*(2*np.pi))**(-1.)*np.exp(-(1./2.)*((NX-psf.x0)/alpha)**2.)*np.exp(-(1./2.)*((NY-psf.y0)/alpha)**2.)
+    
+    #cut down on empty space
+    intx,inty = np.where(gauss>0)
+    #print (np.amin(intx),np.amax(inty))
+    if np.amin(intx) > 200 & np.amin(inty) > 200:
+        if np.amax(inty)<(len(NY)-200) & np.amax(intx)<(len(NX)-200):
+            iminx = np.amin(intx)-200
+            imaxx = np.amax(intx)+200
+    
+            iminy = np.amin(inty)-200
+            imaxy = np.amax(inty)+200
+
+            gauss=gauss[iminx:imaxx,iminy:imaxy]
+            
+    else:
+        pass
+    #print (iminx,iminy,imaxx,imaxy)
+
+    #Getting the obstruction to be the right size. Wonky I know!
+    A = np.zeros((ox/2.+len(NX)/2.,oy/2.+len(NY)/2.))
+    A[:ox,:oy]=obs
+    B=np.zeros((len(NX),len(NY)))
+    B[(len(NX)-len(A[:,0])):,(len(NY)-len(A[0,:])):]=A
+
+    #plt.imshow(B)
+
+    #Avoid the obscuration
+    ind = np.where(B>0)
+    gauss[ind] = 0
+
+    
+    #FFT it!
+    FG = fftpack.fft2(gauss)
+    FGa = fftpack.fftshift(FG)
+    power = np.abs(FGa)**2.
         
+    fig = plt.figure(figsize=(6, 3.2))
+
+    ax = fig.add_subplot(311)
+    ax.set_title('PSF')
+    plt.imshow(power)
+    ax = fig.add_subplot(312)
+    plt.imshow(np.log(power))
+    ax = fig.add_subplot(321)
+    plt.imshow(np.abs(gauss))
+    plt.show()
+
+#gaussian()
 #PSF = MonochromaticSource('/Users/parkerf/Research/WFIRST/PSF/config_file.txt')
-#PSF.show_PSF()
+#PSF.gaussian()
 
 
-class WaveFrontErrors(MonochromaticSource):
+class WaveFrontErrors(PSF):
     def __init__(self):
-        MonochromaticSource.__init__(self,'/Users/parkerf/Research/WFIRST/PSF/config_file.txt')
+        PSF.__init__(self,'/Users/parkerf/Research/WFIRST/PSF/config_file.txt')
 
         #self.fx = config.getint('Instrument','fx')   #Distance to the image plane
         self.x0 = self.config.getfloat('Observation','x0')  #Angle of entry into telescope
@@ -130,7 +200,7 @@ class WaveFrontErrors(MonochromaticSource):
         x0 = self.approx_inputs()[1]
         y0 = self.approx_inputs()[2]
 
-        print 'wave:'+str(wave)+'; x0:'+str(x0)+'; y0:'+str(y0)
+        print ('wave:'+str(wave)+'; x0:'+str(x0)+'; y0:'+str(y0))
         
         z_file = np.genfromtxt('/Users/parkerf/Research/WFIRST/PSF/PSF_zernike_calculation.csv',
                                delimiter=',',skip_header=11)
@@ -149,7 +219,8 @@ class WaveFrontErrors(MonochromaticSource):
         #copied from IDL code essentially
         #What is pas and rpups?
 
-        x, y, x0, y0 = self.grid()
+        X, Y = psf.grid()
+        X, Y = X-(psf.det_nx/2.), Y-(psf.det_ny/2.)
         ai = self.zernike_coeffs()
 
         coeff_correction = np.array([1.,4**(1./2),4**(1./2),3**(1./2),6**(1./2),6**(1./2),8**(1./2),
@@ -166,8 +237,8 @@ class WaveFrontErrors(MonochromaticSource):
         pas = 1.
         rpups = 1.
 
-        p=np.sqrt(((x-x0/2)*pas)**2+((y-y0/2)*pas)**2)/rpups
-        a=np.arctan((y-y0/2)/(x-x0/2)) 
+        p=np.sqrt(((X-psf.x0/2)*pas)**2+((Y-psf.y0/2)*pas)**2)/rpups
+        a=np.arctan((Y-psf.y0/2)/(X-psf.x0/2)) 
         p2 = p*p
         p3 = p2*p
         p4 = p3*p
@@ -197,7 +268,9 @@ class WaveFrontErrors(MonochromaticSource):
           #+ai[24]*((6*p6-5*p4)*sin4a)+ai[25]*((6*p6-5*p4)*cos4a)
           #+ai[26]*((p6)*sin6a)+ai[27]*((p6)*cos6a)))/1000.
 
-        
+        Zfft = fftpack.fft2(Ze)
+        Zfft = fftpack.fftshift(Zfft)
+        Z_fft = np.abs(Zfft)**2.
 
         #plot it
         fig = plt.figure(figsize=(6, 3.2))
@@ -205,12 +278,12 @@ class WaveFrontErrors(MonochromaticSource):
         ax = fig.add_subplot(111)
         ax.set_title('Wave Front Errors')
 
-        plt.imshow(Ze)
+        plt.imshow(Z_fft)
 
-        plt.imshow(Ze+self.gaussian())
+        #plt.imshow(Ze+self.gaussian())
 
         plt.show()
-        return Ze
+        #return Ze
     
         
 WaveFrontErrors().zernike_function()
